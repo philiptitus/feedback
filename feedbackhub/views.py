@@ -133,14 +133,62 @@ class IsCompanyAdminOrReadOnly(permissions.BasePermission):
         # Write permissions are only allowed to the company admin
         return obj.administrator == request.user
 
+
+
+
+
+
+
+
+
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
+from .models import Company
+from .serializers import CompanySerializer
+
 class CompanyViewSet(viewsets.ModelViewSet):
     queryset = Company.objects.all()
     serializer_class = CompanySerializer
     permission_classes = [IsCompanyAdminOrReadOnly]
 
     def perform_create(self, serializer):
+        data = serializer.validated_data
+        user = self.request.user
+
+        # Check if the user is already an administrator of another company
+        if Company.objects.filter(administrator=user).exists():
+            raise ValidationError({"detail": "You are already an administrator of another software on our platform. Please make a new account to create a new software."})
+        
+        # Check for duplicate name, email, and website_url
+        if Company.objects.filter(name=data['name']).exists():
+            raise ValidationError({"name": "A company with this name already exists."})
+        if Company.objects.filter(email=data['email']).exists():
+            raise ValidationError({"email": "A company with this email already exists."})
+        if Company.objects.filter(website_url=data['website_url']).exists():
+            raise ValidationError({"website_url": "A company with this website URL already exists."})
+
         # Automatically set the administrator field to the request user
-        serializer.save(administrator=self.request.user)
+        serializer.save(administrator=user)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        try:
+            serializer.is_valid(raise_exception=True)
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        except ValidationError as e:
+            return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
+        except serializers.ValidationError as e:
+            return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+
+
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
@@ -190,12 +238,36 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         user = self.request.user
 
         if user.is_normal_user:
-            # Return feedbacks created by the normal user
-            return Feedback.objects.filter(user=user)
+            # Return feedbacks created by the normal user, ordered by creation date in descending order
+            return Feedback.objects.filter(user=user).order_by('-created_at')
 
         if user.is_admin:
             # Get feedbacks for the company where the user is an admin and mark them as read
-            feedbacks = Feedback.objects.filter(company__administrator=user)
+            feedbacks = Feedback.objects.filter(company__administrator=user).order_by('-created_at')
+            new_feedbacks = feedbacks.filter(status="new")
+
+            for feedback in new_feedbacks:
+                # Mark feedback as read
+                feedback.status = 'read'
+                feedback.save()
+
+                # Inform the owner of the feedback through email and a notification
+                user_email = feedback.user.email
+                subject = "Feedback Checked by Administrator"
+                message = f"Your feedback titled '{feedback.title}' has been checked by the administrator."
+
+                # send_normal_email({
+                #     'email_body': message,
+                #     'email_subject': subject,
+                #     'to_email': user_email
+                # })
+
+                Notification.objects.create(
+                    feedback=feedback,
+                    user=feedback.user,
+                    message=message
+                )
+
             return feedbacks
 
         # By default return an empty queryset (or handle other user roles if any)
@@ -206,7 +278,12 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         admin_email = feedback.company.administrator.email
         subject = "New Feedback Submission"
         message = f"A new feedback has been submitted. Title: {feedback.title}"
-        send_normal_email({'email_body': message, 'email_subject': subject, 'to_email': admin_email})
+        
+        # send_normal_email({
+        #     'email_body': message,
+        #     'email_subject': subject,
+        #     'to_email': admin_email
+        # })
 
         Notification.objects.create(
             feedback=feedback,
@@ -230,7 +307,12 @@ class FeedbackViewSet(viewsets.ModelViewSet):
             user_email = instance.user.email
             subject = "Feedback Status Updated"
             user_message = f"The status of your feedback '{instance.title}' has been updated to {instance.status}."
-            send_normal_email({'email_body': user_message, 'email_subject': subject, 'to_email': user_email})
+            
+            # send_normal_email({
+            #     'email_body': user_message,
+            #     'email_subject': subject,
+            #     'to_email': user_email
+            # })
 
             Notification.objects.create(
                 feedback=instance,
@@ -245,7 +327,12 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         admin_email = instance.company.administrator.email
         subject = "Feedback Deleted"
         message = f"The feedback '{instance.title}' has been deleted."
-        send_normal_email({'email_body': message, 'email_subject': subject, 'to_email': admin_email})
+        
+        # send_normal_email({
+        #     'email_body': message,
+        #     'email_subject': subject,
+        #     'to_email': admin_email
+        # })
 
         Notification.objects.create(
             feedback=instance,
@@ -254,6 +341,9 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         )
 
         instance.delete()
+ 
+
+
 
 from rest_framework import viewsets, permissions
 from .models import Notification, Metrics, Feedback, Company
@@ -270,44 +360,85 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_admin and user.has_company:
-            company = Company.objects.get(administrator=user)
-            feedbacks = Feedback.objects.filter(company=company)
 
-            if feedbacks.count() > 5:
-                categories = feedbacks.values('category__name').annotate(avg_rating=Avg('rating')).filter(avg_rating__isnull=False)
+        # Fetch unread notifications for the user, ordered by creation date (latest first)
+        notifications = Notification.objects.filter(user=user, is_read=False).order_by('-created_at')
 
-                if categories:
-                    best_category = max(categories, key=lambda x: x['avg_rating'])
-                    worst_category = min(categories, key=lambda x: x['avg_rating'])
+        return notifications
 
-                    if best_category['category__name'] != worst_category['category__name']:
-                        best_description = f'Your best performing aspect was {best_category["category__name"]} with an average rating of {best_category["avg_rating"]}.'
-                        worst_description = f'Your worst performing aspect was {worst_category["category__name"]} with an average rating of {worst_category["avg_rating"]}.'
+    def list(self, request, *args, **kwargs):
+        response = super(NotificationViewSet, self).list(request, *args, **kwargs)
 
-                        Metrics.objects.get_or_create(company=company, description=best_description)
-                        Metrics.objects.get_or_create(company=company, description=worst_description)
+        # After fetching the notifications, mark them as read
+        user = self.request.user
+        Notification.objects.filter(user=user, is_read=False).update(is_read=True)
 
-                total_feedbacks = feedbacks.count()
-                feedbacks_description = f'Your total feedbacks are currently {total_feedbacks}.'
-                Metrics.objects.get_or_create(company=company, description=feedbacks_description)
-
-                avg_rating = feedbacks.aggregate(Avg('rating'))['rating__avg']
-                avg_rating_description = f'Your average website rating is {avg_rating}.'
-                Metrics.objects.get_or_create(company=company, description=avg_rating_description)
-
-                sentiment = 'happy' if avg_rating >= 3 else 'sad'
-                sentiment_description = f'Most people are {sentiment} with your website based on the average rating of {avg_rating}.'
-                Metrics.objects.get_or_create(company=company, description=sentiment_description)
-
-        return Notification.objects.filter(user=self.request.user)
+        return response
 
 class MetricsViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MetricsSerializer
 
     def get_queryset(self):
         user = self.request.user
+
         if user.is_admin and user.has_company:
             company = Company.objects.get(administrator=user)
+            feedbacks = Feedback.objects.filter(company=company)
+
+            if feedbacks.count() > 5:
+                # Delete existing metrics if any
+                Metrics.objects.filter(company=company).delete()
+
+                categories = feedbacks.values('category__name').annotate(avg_rating=Avg('rating')).filter(avg_rating__isnull=False)
+
+                if categories:
+                    sorted_categories = sorted(categories, key=lambda x: x['avg_rating'], reverse=True)
+                    best_categories = sorted_categories[:3]
+                    worst_categories = sorted_categories[-3:]
+
+                    best_categories_names = [category["category__name"] for category in best_categories]
+                    best_categories_avg = [category["avg_rating"] for category in best_categories]
+                    best_description = (
+                        f"Your top performing aspects are: {best_categories_names[0]} ({best_categories_avg[0]:.2f}), "
+                        f"{best_categories_names[1]} ({best_categories_avg[1]:.2f}), and {best_categories_names[2]} ({best_categories_avg[2]:.2f}). "
+                        f"Keep up the good work in these areas. Consider rewarding your team for their efforts in these aspects. "
+                        f"Sharing successful strategies used here with other departments could elevate overall performance."
+                    )
+                    Metrics.objects.create(company=company, description=best_description)
+
+                    worst_categories_names = [category["category__name"] for category in worst_categories]
+                    worst_categories_avg = [category["avg_rating"] for category in worst_categories]
+                    worst_description = (
+                        f"Your lowest performing aspects are: {worst_categories_names[0]} ({worst_categories_avg[0]:.2f}), "
+                        f"{worst_categories_names[1]} ({worst_categories_avg[1]:.2f}), and {worst_categories_names[2]} ({worst_categories_avg[2]:.2f}). "
+                        f"These areas need immediate attention. Organize team meetings to identify the root causes of the low ratings. "
+                        f"Consider providing additional training, resources, or revising your strategies to improve these aspects."
+                    )
+                    Metrics.objects.create(company=company, description=worst_description)
+
+                total_feedbacks = feedbacks.count()
+                feedbacks_description = (
+                    f"Your total feedbacks are currently {total_feedbacks}. "
+                    f"Ensure you consistently encourage customers to provide feedback. "
+                    f"More feedback can give a clearer picture of customer satisfaction and areas needing improvement."
+                )
+                Metrics.objects.create(company=company, description=feedbacks_description)
+
+                avg_rating = feedbacks.aggregate(Avg('rating'))['rating__avg']
+                avg_rating_description = (
+                    f"Your average website rating is {avg_rating:.2f}. "
+                    f"This average rating indicates general customer satisfaction. "
+                    f"Aim to maintain or improve this average by addressing the feedback provided and making continuous improvements to your services."
+                )
+                Metrics.objects.create(company=company, description=avg_rating_description)
+
+                sentiment = 'happy' if avg_rating >= 3 else 'sad'
+                sentiment_description = (
+                    f"Most people are {sentiment} with your website based on the average rating of {avg_rating:.2f}. "
+                    f"If the sentiment is 'happy', continue to engage your customers and seek their input on new features or improvements. "
+                    f"If the sentiment is 'sad', prioritize customer satisfaction by addressing their concerns and implementing solutions to improve their experience."
+                )
+                Metrics.objects.create(company=company, description=sentiment_description)
+
             return Metrics.objects.filter(company=company)
         return Metrics.objects.none()

@@ -20,9 +20,9 @@ class CustomUser(AbstractUser):
 # Company Model
 
 class Company(models.Model):
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, unique=True)
     email = models.EmailField(unique=True)
-    website_url = models.URLField()
+    website_url = models.URLField(unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     administrator = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='administered_companies', blank = True, null=True)
 
