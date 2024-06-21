@@ -155,19 +155,19 @@ class CompanyViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         data = serializer.validated_data
         user = self.request.user
-
+        print(data)
         # Check if the user is already an administrator of another company
         if Company.objects.filter(administrator=user).exists():
             raise ValidationError({"detail": "You are already an administrator of another software on our platform. Please make a new account to create a new software."})
         
         # Check for duplicate name, email, and website_url
         if Company.objects.filter(name=data['name']).exists():
-            raise ValidationError({"name": "A company with this name already exists."})
+            raise ValidationError({"detail": "A company with this name already exists."})
         if Company.objects.filter(email=data['email']).exists():
-            raise ValidationError({"email": "A company with this email already exists."})
+            raise ValidationError({"detail": "A company with this email already exists."})
         if Company.objects.filter(website_url=data['website_url']).exists():
-            raise ValidationError({"website_url": "A company with this website URL already exists."})
-
+            raise ValidationError({"detail": "A company with this website URL already exists."})
+ 
         # Automatically set the administrator field to the request user
         serializer.save(administrator=user)
 
@@ -401,8 +401,7 @@ class MetricsViewSet(viewsets.ReadOnlyModelViewSet):
                     best_description = (
                         f"Your top performing aspects are: {best_categories_names[0]} ({best_categories_avg[0]:.2f}), "
                         f"{best_categories_names[1]} ({best_categories_avg[1]:.2f}), and {best_categories_names[2]} ({best_categories_avg[2]:.2f}). "
-                        f"Keep up the good work in these areas. Consider rewarding your team for their efforts in these aspects. "
-                        f"Sharing successful strategies used here with other departments could elevate overall performance."
+                        f"Keep up the good work in these areas."
                     )
                     Metrics.objects.create(company=company, description=best_description)
 
@@ -411,33 +410,27 @@ class MetricsViewSet(viewsets.ReadOnlyModelViewSet):
                     worst_description = (
                         f"Your lowest performing aspects are: {worst_categories_names[0]} ({worst_categories_avg[0]:.2f}), "
                         f"{worst_categories_names[1]} ({worst_categories_avg[1]:.2f}), and {worst_categories_names[2]} ({worst_categories_avg[2]:.2f}). "
-                        f"These areas need immediate attention. Organize team meetings to identify the root causes of the low ratings. "
-                        f"Consider providing additional training, resources, or revising your strategies to improve these aspects."
+                        f"These areas need immediate attention."
                     )
                     Metrics.objects.create(company=company, description=worst_description)
 
                 total_feedbacks = feedbacks.count()
                 feedbacks_description = (
                     f"Your total feedbacks are currently {total_feedbacks}. "
-                    f"Ensure you consistently encourage customers to provide feedback. "
-                    f"More feedback can give a clearer picture of customer satisfaction and areas needing improvement."
+                 
                 )
                 Metrics.objects.create(company=company, description=feedbacks_description)
 
                 avg_rating = feedbacks.aggregate(Avg('rating'))['rating__avg']
                 avg_rating_description = (
                     f"Your average website rating is {avg_rating:.2f}. "
-                    f"This average rating indicates general customer satisfaction. "
-                    f"Aim to maintain or improve this average by addressing the feedback provided and making continuous improvements to your services."
-                )
+)
                 Metrics.objects.create(company=company, description=avg_rating_description)
 
-                sentiment = 'happy' if avg_rating >= 3 else 'sad'
+                sentiment = 'happy' if avg_rating >= 3 else 'dissapointed'
                 sentiment_description = (
-                    f"Most people are {sentiment} with your website based on the average rating of {avg_rating:.2f}. "
-                    f"If the sentiment is 'happy', continue to engage your customers and seek their input on new features or improvements. "
-                    f"If the sentiment is 'sad', prioritize customer satisfaction by addressing their concerns and implementing solutions to improve their experience."
-                )
+                    f"Most people are {sentiment} with your software based on the average rating of {avg_rating:.2f}. "
+ )
                 Metrics.objects.create(company=company, description=sentiment_description)
 
             return Metrics.objects.filter(company=company)
